@@ -8,9 +8,6 @@ import base64
 import shutil
 import time
 
-# st.set_option('', False)
-
-
 def copy_image_to_clicked_folder(image_path, trakt_id):
     if os.path.exists('clicked'):
         shutil.rmtree('clicked')
@@ -158,7 +155,7 @@ elif page == "Collab Filtering":
         if rating > 0:
             user_entry = create_user_entry(rating, trakt_id)
             st.write("Generating recommendations...")
-            if st.button("L2 Item-Item"):
+            if st.button("L2 Norm Item-Item"):
                 st.session_state['distance'] = 'euclidean'
                 st.session_state['collab_filter'] = 'item_item'
                 st.write("Using L2 Norm (Euclidean distance) for item-item collaborative filtering.")
@@ -166,7 +163,7 @@ elif page == "Collab Filtering":
                 st.session_state['distance'] = 'cosine'
                 st.session_state['collab_filter'] = 'item_item'
                 st.write("Using Cosine Similarity for item-item collaborative filtering.")
-            elif st.button("L2 User-User"):
+            elif st.button("L2 Norm User-User"):
                 st.session_state['distance'] = 'euclidean'
                 st.session_state['collab_filter'] = 'user_user'
                 st.write("Using L2 Norm (Euclidean distance) for user-user collaborative filtering.")
