@@ -136,7 +136,7 @@ st.markdown("<h3 style='text-align: center; color: tan; '>Collaborative Filterin
 
 st.markdown("\n\n\n\n", unsafe_allow_html=True)
 image_folder = "movie_posters"
-trending_df = pd.read_csv("trakt_movie_info.csv")
+trending_df = pd.read_csv("movie_info/trakt_movie_info.csv")
 
 if page == "Home":
     st.markdown("<h6 style='text-align: center; color: tan; '>Select a movie you've watched and rate it out of 10</h6>", unsafe_allow_html=True)

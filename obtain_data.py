@@ -45,7 +45,7 @@ def get_trending_movies(pages=15):
     '''
     trending_df = pd.DataFrame()
 
-    for page in range(1, pages):
+    for page in range(1, pages+1):
         url = f"{BASE_URL}/movies/trending?page={page}"
         response = request_trakt(url)
 
@@ -183,31 +183,32 @@ def create_user_entry(rating, movie_id):
     '''
     user_entry = pd.DataFrame({'username': ['temp_user_1'], movie_id: [rating]})
     user_entry = user_entry.set_index('username')
-    pivoted = pd.read_csv('trakt_movie_ratings.csv')
+    pivoted = pd.read_csv('movie_info/trakt_movie_ratings.csv')
     pivoted = pivoted.set_index('username')
 
     pivoted = pd.concat([pivoted, user_entry], ignore_index=False)
     
     return pivoted
 
-def main():
-    trending_df = get_trending_movies(25)
-    print('Trending movies fetched successfully.')
+def main(pages=15, ratings=True):
+    start = time.time()
+    trending_df = get_trending_movies(pages)
+    print(f'Fetched {len(trending_df)} trending movies in {(time.time() - start):.2f} seconds.')
 
     trending_df = get_movie_certifications_and_poster_urls(trending_df)
-    trending_df.to_csv('trakt_movie_info.csv', index=False)
-    print('Movie certifications and poster URLs fetched/stored successfully.')
+    trending_df.to_csv('movie_info/trakt_movie_info.csv', index=False)
+    print(f'Movie certifications and poster URLs fetched/stored successfully in {(time.time() - start):.2f} seconds.')
 
     store_movie_posters('movie_posters', trending_df)
-    print('Movie posters fetched/stored successfully.')
+    print(f'Movie posters stored successfully in {(time.time() - start):.2f} seconds.')
 
-    movie_ids = list(trending_df['ids.trakt'])
-    username_set = get_usernames_of_watchers(movie_ids)
-    print('Usernames of watchers fetched successfully.')
+    if ratings:
+        movie_ids = list(trending_df['ids.trakt'])
+        username_set = get_usernames_of_watchers(movie_ids)
+        print(f'Fetched usernames of watchers for {len(movie_ids)} movies in {(time.time() - start):.2f} seconds.')
 
-    overall_movie_ratings_df = get_movie_ratings(username_set)
-    overall_movie_ratings_df.to_csv('trakt_movie_ratings.csv')
-    print('Movie ratings fetched/stored successfully.')
-
+        overall_movie_ratings_df = get_movie_ratings(username_set)
+        overall_movie_ratings_df.to_csv('movie_info/trakt_movie_ratings.csv')
+        print(f'Fetched movie ratings for {len(username_set)} users in {(time.time() - start):.2f} seconds.')
 if __name__ == "__main__":
     main()
