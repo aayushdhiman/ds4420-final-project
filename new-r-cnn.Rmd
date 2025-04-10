@@ -1,0 +1,452 @@
+---
+title: "new-r-cnn"
+author: "Aayush Dhiman"
+date: "2025-04-10"
+output: html_document
+---
+## Imports
+```{r setup, include=FALSE}
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(caret)
+library(magick)
+library(httr)
+library(purrr)
+library(torch)
+library(reticulate)
+library(gridExtra)
+```
+
+## Load the dataset
+
+```{r}
+print("Loading dataset...")
+df <- read.csv('movie_info/trakt_movie_info.csv')
+print(paste("Dataset loaded with", nrow(df), "rows"))
+
+# Show first few rows
+head(df)
+
+# Check unique certifications and their counts
+certification_counts <- df %>% 
+  count(certification) %>% 
+  arrange(desc(n))
+
+print("Top 10 certifications:")
+head(certification_counts, 10)
+```
+
+## Filter on certifications
+
+```{r}
+# Focus on certifications with at least 20 movies
+min_samples <- 20
+common_certifications <- certification_counts %>% 
+  filter(n >= min_samples) %>% 
+  pull(certification)
+
+print(paste("Certifications with at least", min_samples, "samples:", length(common_certifications)))
+print(common_certifications)
+
+# Filter dataset to include only common certifications
+df_filtered <- df %>% 
+  filter(certification %in% common_certifications)
+
+print(paste("Dataset size after filtering:", nrow(df_filtered), "movies"))
+```
+
+## Create a label encoder
+
+```{r}
+# Create a label encoder for the certifications
+df_filtered <- df_filtered %>% 
+  mutate(encoded_certification = as.numeric(factor(certification)))
+
+num_classes <- length(unique(df_filtered$certification))
+print(paste("Number of classes:", num_classes))
+
+# Show label mapping
+label_mapping <- data.frame(
+  certification = unique(df_filtered$certification),
+  encoded = unique(df_filtered$encoded_certification)
+) %>% arrange(encoded)
+
+print(label_mapping)
+```
+
+## Process movie posters from the dataset (.npy files)
+
+```{r}
+np <- import("numpy")
+
+# List all .npy files
+poster_dir <- "movie_posters/"
+npy_files <- list.files(poster_dir, pattern = "\\.npy$", full.names = TRUE)
+
+# Load all .npy files
+print(paste("Found", length(npy_files), ".npy files. Loading..."))
+
+poster_arrays <- lapply(npy_files, function(file) {
+  np$load(file)
+})
+
+# Ssafe combine with 4D tensor
+if (all(sapply(poster_arrays, function(x) all(dim(x) == dim(poster_arrays[[1]]))))) {
+  posters_tensor <- abind::abind(poster_arrays, along = 1)
+  print("Loaded into a single 4D tensor.")
+} else {
+  print("Images have varying dimensions. Kept as a list.")
+}
+
+dim(poster_arrays[[1]])
+```
+
+## Build and train CNN model
+
+```{r}
+input_shape <- c(3, 128, 128)
+num_classes <- 5
+
+cnn_model <- nn_module(
+  "CNNClassifier",
+  
+  initialize = function() {
+    self$conv1 <- nn_conv2d(3, 32, kernel_size = 3, padding = 1)
+    self$conv2 <- nn_conv2d(32, 64, kernel_size = 3, padding = 1)
+    self$conv3 <- nn_conv2d(64, 128, kernel_size = 3, padding = 1)
+    self$conv4 <- nn_conv2d(128, 256, kernel_size = 3, padding = 1)
+    
+    self$pool <- nn_max_pool2d(kernel_size = 2, stride = 2)
+    
+    self$drop25 <- nn_dropout(p = 0.25)
+    self$drop50 <- nn_dropout(p = 0.5)
+    
+    self$flattened_size <- function() {
+      x <- torch_randn(c(1, input_shape))
+      x <- self$forward_conv(x)
+      prod(x$shape[-1])
+    }
+    
+    self$fc1 <- NULL
+    self$output <- NULL
+  },
+  
+  forward_conv = function(x) {
+    x %>% 
+      self$conv1() %>% nnf_relu() %>% self$pool() %>% self$drop25() %>%
+      self$conv2() %>% nnf_relu() %>% self$pool() %>% self$drop25() %>%
+      self$conv3() %>% nnf_relu() %>% self$pool() %>% self$drop25() %>%
+      self$conv4() %>% nnf_relu() %>% self$pool() %>% self$drop25()
+  },
+  
+  forward = function(x) {
+    x <- self$forward_conv(x)
+    
+    if (is.null(self$fc1)) {
+      self$fc1 <- nn_linear(self$flattened_size(), 512)
+      self$output <- nn_linear(512, num_classes)
+    }
+    
+    x <- x$view(c(x$size(1), -1))
+    x <- x %>% self$fc1() %>% nnf_relu() %>% self$drop50()
+    x <- self$output(x)
+    
+    return(x)
+  }
+)
+
+model <- cnn_model()
+
+# Summary
+dummy_input <- torch_randn(c(1, input_shape))
+output <- model(dummy_input)
+print(output$shape)
+```
+
+## Resize all the posters and convert to tensors
+
+```{r}
+np <- import("numpy")
+
+target_height <- 128
+target_width <- 128
+
+# Convert to npy
+process_image <- function(file) {
+  img_array <- np$load(file)
+  
+  img <- image_read(img_array / 255)  # Normalize to [0,1] for magick
+  img <- image_resize(img, paste0(target_width, "x", target_height, "!"))  # force exact size
+
+  img_tensor <- as.numeric(image_data(img)) / 255  # shape: H x W x C
+  img_tensor <- torch_tensor(aperm(array(img_tensor, dim = c(3, target_height, target_width)), c(1, 2, 3)), dtype = torch_float())
+  
+  return(img_tensor)
+}
+
+# Process all images
+poster_dir <- "movie_posters/"
+npy_files <- list.files(poster_dir, pattern = "\\.npy$", full.names = TRUE)
+
+poster_tensors <- lapply(npy_files, process_image)
+
+```
+
+## Prepare data for training
+```{r}
+X <- torch_stack(poster_tensors)
+
+y <- torch_tensor(df_filtered$encoded_certification, dtype = torch_long())
+
+# Train test split
+set.seed(42)
+num_samples <- X$size(1)
+indices <- sample(1:num_samples)
+train_ratio <- 0.8
+train_size <- floor(train_ratio * num_samples)
+
+train_indices <- indices[1:train_size]
+test_indices  <- indices[(train_size + 1):num_samples]
+
+X_train <- X[train_indices, ..]
+X_test  <- X[test_indices, ..]
+
+y_train <- y[train_indices]
+y_test  <- y[test_indices]
+```
+
+## Train the model
+```{r}
+epochs <- 25
+batch_size <- 32
+patience <- 5
+min_delta <- 0.001
+lr_reduce_patience <- 3
+lr_factor <- 0.2
+
+train_dataset <- tensor_dataset(X_train, y_train)
+train_loader <- dataloader(train_dataset, batch_size = batch_size, shuffle = TRUE)
+
+valid_dataset <- tensor_dataset(X_test, y_test)
+valid_loader <- dataloader(valid_dataset, batch_size = batch_size)
+
+# Optimizer and loss
+optimizer <- optim_adam(model$parameters, lr = 0.001)
+criterion <- nn_cross_entropy_loss()
+
+# Learning rate changing
+best_val_loss <- Inf
+best_weights <- NULL
+epochs_no_improve <- 0
+lr_patience_counter <- 0
+```
+
+## Training Loop
+```{r}
+history <- list(
+  train_loss = c(),
+  val_loss = c(),
+  val_acc = c()
+)
+
+for (epoch in 1:epochs) {
+  model$train()
+  train_loss <- 0
+  
+  coro::loop(for (batch in train_loader) {
+    optimizer$zero_grad()
+    output <- model(batch[[1]])
+    loss <- criterion(output, batch[[2]])
+    loss$backward()
+    optimizer$step()
+    train_loss <- train_loss + loss$item()
+  })
+  
+  # Validation phase
+  model$eval()
+  valid_loss <- 0
+  correct <- 0
+  total <- 0
+  
+  coro::loop(for (batch in valid_loader) {
+    output <- model(batch[[1]])
+    loss <- criterion(output, batch[[2]])
+    valid_loss <- valid_loss + loss$item()
+    
+    preds <- output$argmax(dim = 2)
+    correct <- correct + (preds == batch[[2]])$sum()$item()
+    total <- total + batch[[2]]$size(1)
+  })
+  
+  avg_train_loss <- train_loss / length(train_loader)
+  avg_valid_loss <- valid_loss / length(valid_loader)
+  val_accuracy <- correct / total
+  
+  cat(sprintf("Epoch %d/%d - loss: %.4f - val_loss: %.4f - val_acc: %.4f\n", 
+              epoch, epochs, avg_train_loss, avg_valid_loss, val_accuracy))
+  
+  # Change alpha (learning rate)
+  if (avg_valid_loss + min_delta < best_val_loss) {
+    best_val_loss <- avg_valid_loss
+    best_weights <- model$state_dict()
+    epochs_no_improve <- 0
+    lr_patience_counter <- 0
+  } else {
+    epochs_no_improve <- epochs_no_improve + 1
+    lr_patience_counter <- lr_patience_counter + 1
+  }
+  
+  if (lr_patience_counter >= lr_reduce_patience) {
+    current_lr <- optimizer$param_groups[[1]]$lr
+    new_lr <- current_lr * lr_factor
+    optimizer$param_groups[[1]]$lr <- new_lr
+    cat(sprintf("Reducing learning rate to %.6f\n", new_lr))
+    lr_patience_counter <- 0
+  }
+  
+  if (epochs_no_improve >= patience) {
+    cat("Early stopping triggered.\n")
+    break
+  }
+  history$train_loss <- c(history$train_loss, avg_train_loss)
+  history$val_loss <- c(history$val_loss, avg_valid_loss)
+  history$val_acc <- c(history$val_acc, val_accuracy)
+}
+
+# Restore best model weights
+model$load_state_dict(best_weights)
+
+```
+
+## Plot the training history
+```{r}
+df_history <- tibble(
+  epoch = 1:length(history$train_loss),
+  train_loss = history$train_loss,
+  val_loss = history$val_loss,
+  val_acc = history$val_acc
+)
+
+# Accuracy plot
+acc_plot <- df_history %>%
+  select(epoch, val_acc, train_acc = val_acc) %>%
+  pivot_longer(-epoch, names_to = "type", values_to = "accuracy") %>%
+  ggplot(aes(x = epoch, y = accuracy, color = type)) +
+  geom_line(size = 1) +
+  labs(title = "Model Accuracy", y = "Accuracy", x = "Epoch") +
+  theme_minimal() +
+  scale_color_manual(values = c("train_acc" = "blue", "val_acc" = "orange"),
+                     labels = c("Train", "Validation"))
+
+# Loss plot
+loss_plot <- df_history %>%
+  select(epoch, train_loss, val_loss) %>%
+  pivot_longer(-epoch, names_to = "type", values_to = "loss") %>%
+  ggplot(aes(x = epoch, y = loss, color = type)) +
+  geom_line(size = 1) +
+  labs(title = "Model Loss", y = "Loss", x = "Epoch") +
+  theme_minimal() +
+  scale_color_manual(values = c("train_loss" = "blue", "val_loss" = "orange"),
+                     labels = c("Train", "Validation"))
+
+grid.arrange(acc_plot, loss_plot, ncol = 2)
+```
+
+## Evaluate the model
+```{r}
+model$eval()
+
+all_preds <- c()
+all_targets <- c()
+
+coro::loop(for (batch in valid_loader) {
+  outputs <- model(batch[[1]])
+  preds <- as_array(outputs$argmax(dim = 2))
+  targets <- as_array(batch[[2]])
+  
+  all_preds <- c(all_preds, preds)
+  all_targets <- c(all_targets, targets)
+})
+
+accuracy <- mean(all_preds == all_targets)
+cat(sprintf("Test Accuracy: %.4f\n", accuracy))
+
+```
+
+## Save the trained model
+```{r}
+torch_save(model, "cnn_files/movie_certification_cnn_model.pt")
+cat("Model saved as 'movie_certification_cnn_model.pt'\n")
+
+saveRDS(label_mapping, "cnn_files/certification_encoder.rds")
+cat("Label encoder saved as 'certification_encoder.rds'\n")
+
+```
+
+## Download image function
+```{r}
+download_poster <- function(poster_url) {
+  img <- tryCatch({
+    img <- image_read(poster_url)
+    img <- image_resize(img, paste0(target_width, "x", target_height, "!"))
+    img_tensor <- as.numeric(image_data(img)) / 255
+    img_tensor <- torch_tensor(
+      aperm(array(img_tensor, dim = c(3, target_height, target_width)), c(1, 2, 3)),
+      dtype = torch_float()
+    )
+    img_tensor
+  }, error = function(e) {
+    cat("Error downloading or processing image.\n")
+    return(NULL)
+  })
+  
+  return(img)
+}
+```
+
+## Prediction function
+```{r}
+predict_certification <- function(poster_url) {
+  img <- download_poster(poster_url)
+  if (is.null(img)) {
+    return(NULL)
+  }
+  
+  img <- img$unsqueeze(1)
+  
+  model$eval()
+  output <- model(img)
+  
+  # Get predicted class (argmax) and confidence (max probability)
+  class_idx <- output$argmax(dim = 2)
+  
+  # Convert the class index to a numeric value
+  class_idx_value <- class_idx$item()
+  
+  # Get confidence
+  confidence <- output[1, class_idx_value + 1]$item()
+  
+  # Get certification label
+  certification <- label_mapping$certification[class_idx_value + 1]
+  
+  return(list(certification = certification, confidence = confidence))
+}
+
+```
+
+## Example prediction from the test dataset
+```{r}
+test_poster <- df_filtered$poster_url[1]
+true_certification <- df_filtered$certification[1]
+
+result <- predict_certification(test_poster)
+pred_certification <- result$certification
+confidence <- result$confidence
+
+cat(sprintf("Movie: %s\n", df_filtered$title[1]))
+cat(sprintf("True certification: %s\n", true_certification))
+cat(sprintf("Predicted certification: %s\n", pred_certification))
+cat(sprintf("Confidence: %.2f%%\n", confidence * 100))
+
+```
