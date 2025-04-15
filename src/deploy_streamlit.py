@@ -1,6 +1,7 @@
 import streamlit as st
 from collaborative_filtering import *
 import pandas as pd
+import altair as alt
 
 from PIL import Image
 import os
@@ -120,7 +121,6 @@ st.set_page_config(page_title="Movie Calculator", page_icon=":movie_camera:", la
 if "selected_movie" not in st.session_state:
     st.session_state["selected_movie"] = {}
 
-# Get the page from query parameters, default to "Home"
 query_params = st.experimental_get_query_params()
 page = query_params.get("page", ["Home"])[0]
 
@@ -134,6 +134,7 @@ st.markdown("<h3 style='text-align: center; color: tan; '>Collaborative Filterin
 st.markdown("\n\n\n\n", unsafe_allow_html=True)
 image_folder = "movie_posters"
 trending_df = pd.read_csv("movie_info/trakt_movie_info.csv")
+df = pd.read_csv("movie_info/model_evaluation_results.csv")
 
 if page == "Home":
     st.markdown("<h6 style='text-align: center; color: tan; '>Select a movie you've watched and rate it out of 10</h6>", unsafe_allow_html=True)
@@ -189,9 +190,60 @@ elif page == "Collab Filtering":
                 display_recommended(5, 10, recs, 'recommendations')
             else:
                 st.info("No recommendations available yet.")
+            button_html = f'''
+                    <button style="border:none; background:none; padding:0;">
+                    </button>'''                
+            st.markdown(button_html, unsafe_allow_html=True)
+            if st.button(f"Click here to view interactive graph", key=f"btn_graph", on_click=lambda : (
+                st.experimental_set_query_params(page="Collab Filtering Results")
+            )):
+                pass
 
     else:
         st.info("Please select a movie from the Home page to rate.")
-elif page == "CNN":
-    st.write("This is the CNN page.")
+elif page == "Collab Filtering Results":
+    st.write("This is the Collab Filtering Evaluation page.")
+    st.subheader('Root Mean Squared Error (RMSE)')
+    rmse_chart = alt.Chart(df).mark_bar().encode(
+        x=alt.X('Model:N', sort='-y'),
+        y=alt.Y('RMSE:Q'),
+        tooltip=['Model', 'RMSE']
+    ).properties(
+        title='RMSE Comparison'
+    ).interactive()
+    st.altair_chart(rmse_chart, use_container_width=True)
+
+    # MAE
+    st.subheader('Mean Absolute Error (MAE)')
+    mae_chart = alt.Chart(df).mark_bar().encode(
+        x=alt.X('Model:N', sort='-y'),
+        y=alt.Y('MAE:Q'),
+        tooltip=['Model', 'MAE']
+    ).properties(
+        title='MAE Comparison'
+    ).interactive()
+    st.altair_chart(mae_chart, use_container_width=True)
+
+    # Time (s)
+    st.subheader('Training/Evaluation Time (s)')
+    time_chart = alt.Chart(df).mark_bar().encode(
+        x=alt.X('Model:N', sort='-y'),
+        y=alt.Y('Time (s):Q'),
+        tooltip=['Model', 'Time (s)']
+    ).properties(
+        title='Time Comparison'
+    ).interactive()
+    st.altair_chart(time_chart, use_container_width=True)
+
+    # Memory (MB)
+    st.subheader('Memory Usage (MB)')
+    memory_chart = alt.Chart(df).mark_bar().encode(
+        x=alt.X('Model:N', sort='-y'),
+        y=alt.Y('Memory (MB):Q'),
+        tooltip=['Model', 'Memory (MB)']
+    ).properties(
+        title='Memory Comparison'
+    ).interactive()
+    st.altair_chart(memory_chart, use_container_width=True)
+
 

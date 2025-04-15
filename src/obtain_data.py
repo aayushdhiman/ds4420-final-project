@@ -52,7 +52,7 @@ def get_trending_movies(pages=15):
         if response:
             data = json.loads(response)
             trending_df = pd.concat([trending_df, pd.DataFrame(data)], ignore_index=True)
-    
+
     watchers = trending_df['watchers']
     trending_df = pd.json_normalize(trending_df['movie'])
     trending_df['watchers'] = watchers
